@@ -1,27 +1,14 @@
-server:
-  port: ${SERVER_PORT:8088}
-  address: ${SERVER_ADDRESS:0.0.0.0}
+FROM maven:3.9.6-eclipse-temurin-17-alpine AS build
+WORKDIR /app
+COPY pom.xml .
+RUN mvn dependency:go-offline -B
+COPY src ./src
+RUN mvn clean package -DskipTests
 
-spring:
-  application:
-    name: ${SPRING_APPLICATION_NAME:gsinfo-file-service}
-  servlet:
-    multipart:
-      max-file-size: ${SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE:50MB}
-      max-request-size: ${SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE:50MB}
-      file-size-threshold: ${SPRING_SERVLET_MULTIPART_FILE_SIZE_THRESHOLD:2MB}
-
-supabase:
-  enabled: ${SUPABASE_ENABLED:true}
-  url: ${SUPABASE_URL:https://reyioqoddtbtqyrzproe.supabase.co}
-  service-role-key: ${SUPABASE_SERVICE_ROLE_KEY:}
-  storage:
-    bucket: ${SUPABASE_STORAGE_BUCKET:img}
-
-logging:
-  level:
-    com.gsi.gsinfo: ${LOGGING_LEVEL_COM_GSI_GSINFO:DEBUG}
-    com.supabase: ${LOGGING_LEVEL_COM_SUPABASE:DEBUG}
-    org.springframework.web: ${LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_WEB:INFO}
-  file:
-    name: ${LOGGING_FILE_NAME:logs/file-service.log}
+FROM eclipse-temurin:17-jre-alpine
+WORKDIR /app
+COPY --from=build /app/target/*.jar app.jar
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+EXPOSE 8080
+ENTRYPOINT ["java", "-Xmx512m", "-jar", "app.jar"]
