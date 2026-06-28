@@ -3,9 +3,9 @@ package gsinfo.imagens.service;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
-import okhttp3.MultipartBody;
 import okhttp3.RequestBody;
 import okhttp3.MediaType;
+import okhttp3.MultipartBody;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -28,11 +28,11 @@ public class FileService {
     @Value("${supabase.service-role-key}")
     private String serviceRoleKey;
 
-    @Value("${supabase.storage.bucket:images}")
+    @Value("${supabase.storage.bucket:imagem}")  // 🔑 Default agora é "imagem"
     private String bucketName;
 
-    @Value("${supabase.storage.folder:produtos}")
-    private String defaultFolder;
+    @Value("${supabase.enabled:true}")
+    private boolean supabaseEnabled;
 
     private OkHttpClient client;
 
@@ -44,69 +44,87 @@ public class FileService {
                 .readTimeout(30, TimeUnit.SECONDS)
                 .build();
 
-        logger.info("✅ FileService inicializado com Supabase Storage!");
-        logger.info("📡 URL: {}", supabaseUrl);
-        logger.info("📦 Bucket: {}", bucketName);
+        if (supabaseEnabled) {
+            logger.info("✅ FileService inicializado com Supabase Storage!");
+            logger.info("📡 URL: {}", supabaseUrl);
+            logger.info("📦 Bucket: {}", bucketName);
+            logger.info("📁 Upload direto na raiz do bucket: {}", bucketName);
+        } else {
+            logger.warn("⚠️ Supabase está desabilitado.");
+        }
     }
 
-    // ============================================
-    // MÉTODOS PARA O CONTROLLER
-    // ============================================
-
     /**
-     * Upload de arquivo (usado pelo Controller)
+     * Upload de arquivo usando MultipartBody (form-data)
      */
-    public String uploadFile(MultipartFile file, String folder) throws IOException {
+    public String uploadFile(MultipartFile file) throws IOException {
+        if (!supabaseEnabled) {
+            logger.warn("⚠️ Supabase desabilitado. Salvando arquivo localmente.");
+            return saveLocally(file);
+        }
+
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("Arquivo vazio ou nulo");
         }
 
+        // Gera nome único
         String originalFilename = file.getOriginalFilename();
-        String extension = "";
-        if (originalFilename != null && originalFilename.contains(".")) {
-            extension = originalFilename.substring(originalFilename.lastIndexOf("."));
-        }
+        String extension = getFileExtension(originalFilename);
         String uniqueName = UUID.randomUUID().toString() + extension;
 
-        String folderPath = (folder != null && !folder.isEmpty()) ? folder : defaultFolder;
-        String filePath = folderPath + "/" + uniqueName;
-
-        String url = supabaseUrl + "/storage/v1/object/" + bucketName + "/" + filePath;
+        // 🔑 URL usando o novo bucket "imagem"
+        String url = supabaseUrl + "/storage/v1/object/" + bucketName + "/" + uniqueName;
 
         logger.info("📤 Upload para Supabase: {}", url);
+        logger.info("📁 Arquivo: {}", originalFilename);
+        logger.info("📏 Tamanho: {} bytes", file.getSize());
+        logger.info("📋 Content-Type: {}", file.getContentType());
+        logger.info("📦 Bucket: {}", bucketName);
 
-        RequestBody requestBody = new MultipartBody.Builder()
+        // Usa MultipartBody.FORM
+        MediaType mediaType = MediaType.parse(file.getContentType());
+        if (mediaType == null) {
+            mediaType = MediaType.parse("image/jpeg");
+        }
+
+        MultipartBody multipartBody = new MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
-                .addFormDataPart("file", file.getOriginalFilename(),
-                        RequestBody.create(file.getBytes(), MediaType.parse(file.getContentType())))
+                .addFormDataPart("file", originalFilename,
+                        RequestBody.create(file.getBytes(), mediaType))
                 .build();
 
         Request request = new Request.Builder()
                 .url(url)
-                .post(requestBody)
+                .post(multipartBody)
                 .addHeader("Authorization", "Bearer " + serviceRoleKey)
                 .addHeader("apikey", serviceRoleKey)
                 .build();
 
         try (Response response = client.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                String errorBody = response.body() != null ? response.body().string() : "Unknown error";
+            if (response.isSuccessful()) {
+                String publicUrl = getPublicUrl(uniqueName);
+                logger.info("✅ Upload concluído com sucesso!");
+                logger.info("🔗 URL: {}", publicUrl);
+                return publicUrl;
+            } else {
+                String errorBody = response.body() != null ? response.body().string() : "Unknown";
+                logger.error("❌ Upload falhou: {} - {}", response.code(), errorBody);
                 throw new IOException("Upload falhou: " + response.code() + " - " + errorBody);
             }
-
-            String publicUrl = getPublicUrl(filePath);
-            logger.info("✅ Upload concluído: {}", publicUrl);
-            return publicUrl;
         }
     }
 
     /**
-     * Download de arquivo (usado pelo Controller)
+     * Download de arquivo
      */
-    public byte[] downloadFile(String filePath) throws IOException {
-        String url = supabaseUrl + "/storage/v1/object/" + bucketName + "/" + filePath;
+    public byte[] downloadFile(String fileName) throws IOException {
+        if (!supabaseEnabled) {
+            throw new IOException("Supabase está desabilitado");
+        }
 
-        logger.info("📥 Download do Supabase: {}", url);
+        String url = supabaseUrl + "/storage/v1/object/" + bucketName + "/" + fileName;
+
+        logger.info("📥 Download: {}", url);
 
         Request request = new Request.Builder()
                 .url(url)
@@ -119,22 +137,21 @@ public class FileService {
             if (!response.isSuccessful()) {
                 throw new IOException("Download falhou: " + response.code());
             }
-
-            if (response.body() == null) {
-                throw new IOException("Resposta vazia");
-            }
-
-            return response.body().bytes();
+            return response.body() != null ? response.body().bytes() : new byte[0];
         }
     }
 
     /**
-     * Remove arquivo (usado pelo Controller)
+     * Remove arquivo
      */
-    public boolean deleteFile(String filePath) {
-        String url = supabaseUrl + "/storage/v1/object/" + bucketName + "/" + filePath;
+    public boolean deleteFile(String fileName) {
+        if (!supabaseEnabled) {
+            return false;
+        }
 
-        logger.info("🗑️ Removendo do Supabase: {}", url);
+        String url = supabaseUrl + "/storage/v1/object/" + bucketName + "/" + fileName;
+
+        logger.info("🗑️ Removendo: {}", url);
 
         Request request = new Request.Builder()
                 .url(url)
@@ -152,92 +169,111 @@ public class FileService {
     }
 
     /**
-     * Verifica se o arquivo existe (usado pelo Controller)
+     * Verifica se o arquivo existe
      */
-    public boolean fileExists(String filePath) {
+    public boolean fileExists(String fileName) {
+        if (!supabaseEnabled) {
+            return false;
+        }
+
         try {
-            byte[] data = downloadFile(filePath);
-            return data != null && data.length > 0;
+            String url = supabaseUrl + "/storage/v1/object/" + bucketName + "/" + fileName;
+            Request request = new Request.Builder()
+                    .url(url)
+                    .head()
+                    .addHeader("Authorization", "Bearer " + serviceRoleKey)
+                    .addHeader("apikey", serviceRoleKey)
+                    .build();
+
+            try (Response response = client.newCall(request).execute()) {
+                return response.isSuccessful();
+            }
         } catch (IOException e) {
             return false;
         }
     }
 
     /**
-     * Obtém URL pública (usado pelo Controller)
+     * Obtém URL pública
      */
-    public String getPublicUrl(String filePath) {
-        return supabaseUrl + "/storage/v1/object/public/" + bucketName + "/" + filePath;
+    public String getPublicUrl(String fileName) {
+        return supabaseUrl + "/storage/v1/object/public/" + bucketName + "/" + fileName;
     }
 
     /**
-     * Extrai o caminho do bucket da URL (usado pelo Controller)
+     * Extrai nome do arquivo da URL
      */
-    public String extractPathFromUrl(String url) {
+    public String extractFileNameFromUrl(String url) {
         if (url == null || url.isEmpty()) {
             return "";
         }
 
-        String prefix = supabaseUrl + "/storage/v1/object/public/" + bucketName + "/";
-        if (url.startsWith(prefix)) {
-            return url.substring(prefix.length());
+        String publicPrefix = supabaseUrl + "/storage/v1/object/public/" + bucketName + "/";
+        if (url.startsWith(publicPrefix)) {
+            return url.substring(publicPrefix.length());
         }
 
-        if (url.contains("/storage/v1/object/public/")) {
-            int idx = url.indexOf("/storage/v1/object/public/") + 28;
-            return url.substring(idx);
+        String objectPrefix = supabaseUrl + "/storage/v1/object/" + bucketName + "/";
+        if (url.startsWith(objectPrefix)) {
+            return url.substring(objectPrefix.length());
         }
 
         return url;
     }
 
     /**
-     * Extrai o nome do arquivo (usado pelo Controller)
+     * Salva localmente (fallback)
      */
-    public String extractFileName(String filePath) {
-        if (filePath == null || filePath.isEmpty()) {
-            return "";
-        }
+    private String saveLocally(MultipartFile file) throws IOException {
+        String originalFilename = file.getOriginalFilename();
+        String extension = getFileExtension(originalFilename);
+        String fileName = System.currentTimeMillis() + "_" + UUID.randomUUID().toString() + extension;
 
-        if (filePath.contains("/storage/v1/object/public/")) {
-            int idx = filePath.indexOf("/storage/v1/object/public/") + 28;
-            filePath = filePath.substring(idx);
-        }
+        java.nio.file.Path path = java.nio.file.Paths.get("uploads", fileName);
+        java.nio.file.Files.createDirectories(path.getParent());
+        file.transferTo(path.toFile());
 
-        if (filePath.contains("/")) {
-            return filePath.substring(filePath.lastIndexOf("/") + 1);
-        }
-
-        return filePath;
+        logger.info("✅ Arquivo salvo localmente: {}", path);
+        return "/uploads/" + fileName;
     }
 
     // ============================================
-    // MÉTODOS LEGADO (para compatibilidade)
+    // MÉTODOS LEGADO
     // ============================================
 
     public String createFile(MultipartFile file) throws IOException {
-        return uploadFile(file, defaultFolder);
+        logger.info("📤 Processando upload de imagem:");
+        logger.info("   - Nome: {}", file.getOriginalFilename());
+        logger.info("   - Tipo: {}", file.getContentType());
+        logger.info("   - Tamanho: {} bytes", file.getSize());
+        logger.info("   - Bucket: {}", bucketName);
+
+        return uploadFile(file);
     }
 
     public byte[] readFile(String nome) throws IOException {
-        String filePath = extractPathFromUrl(nome);
-        return downloadFile(filePath);
+        String fileName = extractFileNameFromUrl(nome);
+        return downloadFile(fileName);
     }
 
     public String removeFile(String nome) {
         try {
-            String filePath = extractPathFromUrl(nome);
-            boolean deleted = deleteFile(filePath);
-            if (deleted) {
-                return "Arquivo eliminado com sucesso: " + nome;
-            } else {
-                return "Erro ao eliminar o arquivo: " + nome;
-            }
+            String fileName = extractFileNameFromUrl(nome);
+            boolean deleted = deleteFile(fileName);
+            return deleted ? "Arquivo eliminado com sucesso: " + nome : "Erro ao eliminar: " + nome;
         } catch (Exception e) {
-            logger.error("❌ Erro ao remover: {}", e.getMessage());
-            return "Erro ao eliminar o arquivo: " + e.getMessage();
+            return "Erro ao eliminar: " + e.getMessage();
         }
     }
+
+    // ============================================
+    // MÉTODOS DE UTILIDADE
+    // ============================================
+
+    private String getFileExtension(String filename) {
+        if (filename == null || !filename.contains(".")) {
+            return "";
+        }
+        return filename.substring(filename.lastIndexOf("."));
+    }
 }
-
-

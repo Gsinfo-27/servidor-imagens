@@ -25,7 +25,7 @@ supabase:
   url: ${SUPABASE_URL:https://reyioqoddtbtqyrzproe.supabase.co}
   service-role-key: ${SUPABASE_SERVICE_ROLE_KEY:}
   storage:
-    bucket: ${SUPABASE_STORAGE_BUCKET:img}
+    bucket: ${SUPABASE_STORAGE_BUCKET:imagem}
 
 # ============================================
 # LOGGING
